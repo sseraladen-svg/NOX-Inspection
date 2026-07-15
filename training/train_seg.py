@@ -1,53 +1,27 @@
 from ultralytics import YOLO
 
-
 def main():
-
-    print("===================================")
-    print(" BatteryVisionAI Training Started")
-    print("===================================\n")
-
-    # Load pretrained YOLO11 Segmentation model
+    print("BatteryVisionAI Training Started\n")
+    
     model = YOLO("models/yolo11n-seg.pt")
 
-    # Train
     model.train(
-        data="dataset/data.yaml",
-        epochs=100,
+        data="dataset/data.yaml", # Ensure this file exists in Colab
+        epochs=50, # Reduced for Colab free tier testing
         imgsz=640,
         batch=8,
-        workers=4,
-        device=0,                 # Use "cpu" if no GPU
+        workers=2, # Colab has limited workers
+        device=0,  # Uses Colab's GPU
         project="runs/train",
         name="BatteryVisionAI",
         pretrained=True,
-        optimizer="auto",
-        lr0=0.001,
-        patience=20,
-        save=True,
-        save_period=10,
-        val=True,
-        plots=True,
-        verbose=True
+        patience=10,
+        plots=True
     )
 
-    print("\n===================================")
-    print(" Training Completed")
-    print("===================================")
-
-    # Validate
+    print("Training Completed")
     metrics = model.val()
-
-    print("\nValidation Results")
     print(metrics)
-
-    # Export model (optional)
-    model.export(format="onnx")
-
-    print("\n===================================")
-    print(" Model Exported Successfully")
-    print("===================================")
-
 
 if __name__ == "__main__":
     main()
