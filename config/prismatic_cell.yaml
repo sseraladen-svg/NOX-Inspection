@@ -1,0 +1,31 @@
+product_id: prismatic_cell
+
+stations: 2
+cameras_per_station: 3
+reorientation_steps: ["flip_180", "rotate_90"]
+
+roi: null
+
+preprocessing:
+  resize: [640, 640]
+  blur_kernel: [3, 3]
+  clahe: true
+
+models:
+  yolo_seg: models/prismatic_cell/yolo_seg.pt
+  cnn_classifier: models/prismatic_cell/cnn_classifier.pt
+  anomaly: models/prismatic_cell/anomaly.pt
+
+defect_classes:
+  0: scratch
+  1: dust
+  2: stain
+  3: unclassified
+
+decision_rules:
+  fail_confidence_threshold: 0.5
+  severity_map:
+    scratch: WARN
+    dust: WARN
+    stain: FAIL
+    unclassified: FAIL

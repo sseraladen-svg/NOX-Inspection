@@ -1,0 +1,31 @@
+# schema.yaml
+# Documents the required keys for any product config file under config/.
+# Not enforced by a validator library here — core/config_loader.py checks
+# presence of these keys at load time and raises if any are missing.
+
+product_id: string              # unique product identifier, e.g. "prismatic_cell"
+
+stations: int                   # number of physical camera stations
+cameras_per_station: int        # cameras per station
+reorientation_steps: list[str]  # ordered ops between stations, e.g. ["flip_180", "rotate_90"]
+                                 # empty list [] means single-station, no reorientation
+
+roi: [int, int, int, int] | null  # [x1, y1, x2, y2] fixed crop region, or null for full frame
+
+preprocessing:
+  resize: [int, int]            # target [width, height]
+  blur_kernel: [int, int]       # odd, odd — GaussianBlur kernel size
+  clahe: bool                   # apply CLAHE lighting normalization
+
+models:
+  yolo_seg: string              # path to YOLO segmentation weights
+  cnn_classifier: string        # path to CNN classifier weights
+  anomaly: string                # path to anomaly detection weights
+
+defect_classes:
+  <int>: string                 # class_id -> class name, e.g. 0: scratch
+
+decision_rules:
+  fail_confidence_threshold: float   # min confidence to count a detection
+  severity_map:
+    <class_name>: "WARN" | "FAIL"    # per-class severity used by overlay + decision engine

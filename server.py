@@ -1,3 +1,4 @@
+import argparse
 from flask import Flask, request
 import cv2
 import numpy as np
@@ -7,7 +8,20 @@ import shutil
 import time
 from datetime import datetime
 
-from detection.detector import Detector
+from core.config_loader import load_config
+from core.preprocessing import Preprocessor
+from core.detector import Detector
+from core.decision_engine import DecisionEngine
+from core.overlay import draw_aoi_overlay
+
+# ==========================================================
+# CLI / Config
+# ==========================================================
+parser = argparse.ArgumentParser()
+parser.add_argument("--product", default="prismatic_cell", help="Product config id under config/")
+args, _ = parser.parse_known_args()
+
+CONFIG = load_config(args.product)
 
 app = Flask(__name__)
 
@@ -29,7 +43,7 @@ os.makedirs(FAIL_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # ==========================================================
-# CSV Log File
+# CSV Log File — now includes per-camera/per-station traceability
 # ==========================================================
 CSV_FILE = os.path.join(LOG_DIR, "inspection.csv")
 
@@ -37,28 +51,22 @@ if not os.path.exists(CSV_FILE):
     with open(CSV_FILE, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
-            "ImageID",
-            "Timestamp",
-            "CameraID",
-            "Result",
-            "DefectType",
-            "Confidence",
-            "InferenceTime(ms)",
-            "OriginalImage",
-            "AnnotatedImage"
+            "ImageID", "Timestamp", "ProductID", "StationID", "CameraID",
+            "Result", "Severity", "DefectType", "Confidence",
+            "InferenceTime(ms)", "OriginalImage", "AnnotatedImage"
         ])
 
 # ==========================================================
-# Load YOLO Model
+# Core pipeline modules — all config-driven
 # ==========================================================
-detector = Detector(
-    seg_model_path="models/yolo11n-seg.pt",
-    conf=0.5
-)
+preprocessor = Preprocessor(CONFIG)
+detector = Detector(CONFIG)
+decision_engine = DecisionEngine(CONFIG)
 
-print("[BatteryVisionAI] YOLO Model Loaded")
+print(f"[NOX Inspection] Loaded product config: {CONFIG['product_id']}")
 
-CAMERA_ID = "ESP32_CAM_01"
+DEFAULT_STATION_ID = "station_01"
+DEFAULT_CAMERA_ID = "cam_01"
 
 # ==========================================================
 # Upload Route
@@ -70,6 +78,9 @@ def upload():
 
     if len(image_bytes) == 0:
         return "No Image", 400
+
+    station_id = request.args.get("station_id", DEFAULT_STATION_ID)
+    camera_id = request.args.get("camera_id", DEFAULT_CAMERA_ID)
 
     # ------------------------------------------------------
     # Decode Image
@@ -99,42 +110,23 @@ def upload():
     cv2.imwrite(original_path, frame)
 
     # ------------------------------------------------------
-    # ROI (Adjust Coordinates Later)
+    # Preprocessing (OpenCV stage, config-driven: ROI/resize/denoise/CLAHE)
     # ------------------------------------------------------
-    roi = frame
-
-    # Example:
-    # roi = frame[100:500, 150:650]
-
-    # ------------------------------------------------------
-    # Resize
-    # ------------------------------------------------------
-    roi = cv2.resize(
-        roi,
-        (640, 640),
-        interpolation=cv2.INTER_LINEAR
-    )
-
-    # ------------------------------------------------------
-    # Noise Reduction
-    # ------------------------------------------------------
-    roi = cv2.GaussianBlur(
-        roi,
-        (3, 3),
-        0
-    )
+    processed = preprocessor.process(frame)
 
     # ------------------------------------------------------
     # YOLO Inference
     # ------------------------------------------------------
     start = time.perf_counter()
 
-    annotated_frame, detections = detector.detect(roi)
+    _, detections = detector.detect(processed)
 
-    annotated_frame = detector.draw_info(
-        annotated_frame,
-        detections
-    )
+    # ------------------------------------------------------
+    # Decision Engine — PASS/FAIL decided here, not inline
+    # ------------------------------------------------------
+    decision = decision_engine.evaluate(detections, station_id=station_id, camera_id=camera_id)
+
+    annotated_frame = draw_aoi_overlay(processed, decision["detections"])
 
     end = time.perf_counter()
 
@@ -157,42 +149,13 @@ def upload():
     )
 
     # ------------------------------------------------------
-    # PASS / FAIL
+    # PASS / FAIL routing
     # ------------------------------------------------------
-    if len(detections) > 0:
-
-        result = "FAIL"
-
-        defect = detections[0]["label"]
-
-        confidence = detections[0]["confidence"]
-
-        shutil.copy(
-            original_path,
-            os.path.join(
-                FAIL_DIR,
-                f"{image_id}.jpg"
-            )
-        )
-
-    else:
-
-        result = "PASS"
-
-        defect = "None"
-
-        confidence = 1.00
-
-        shutil.copy(
-            original_path,
-            os.path.join(
-                PASS_DIR,
-                f"{image_id}.jpg"
-            )
-        )
+    dest_dir = FAIL_DIR if decision["result"] == "FAIL" else PASS_DIR
+    shutil.copy(original_path, os.path.join(dest_dir, f"{image_id}.jpg"))
 
     # ------------------------------------------------------
-    # CSV Logging
+    # CSV Logging — per-camera/per-station traceability
     # ------------------------------------------------------
     with open(
         CSV_FILE,
@@ -205,10 +168,13 @@ def upload():
         writer.writerow([
             image_id,
             timestamp,
-            CAMERA_ID,
-            result,
-            defect,
-            confidence,
+            CONFIG["product_id"],
+            station_id,
+            camera_id,
+            decision["result"],
+            decision["severity"],
+            decision["defect"],
+            decision["confidence"],
             inference_time,
             original_path,
             annotated_path
@@ -220,13 +186,14 @@ def upload():
     print("\n====================================")
     print(f"Image ID       : {image_id}")
     print(f"Timestamp      : {timestamp}")
-    print(f"Result         : {result}")
-    print(f"Defect         : {defect}")
-    print(f"Confidence     : {confidence}")
+    print(f"Station/Camera : {station_id} / {camera_id}")
+    print(f"Result         : {decision['result']} ({decision['severity']})")
+    print(f"Defect         : {decision['defect']}")
+    print(f"Confidence     : {decision['confidence']}")
     print(f"Inference Time : {inference_time} ms")
     print("====================================")
 
-    return "OK", 200
+    return decision["result"], 200
 
 
 # ==========================================================
@@ -235,8 +202,8 @@ def upload():
 if __name__ == "__main__":
 
     print("\n====================================")
-    print(" BatteryVisionAI Server Started")
-    print(" Waiting for ESP32-CAM Images...")
+    print(f" NOX Inspection Server — product: {CONFIG['product_id']}")
+    print(" Waiting for camera images...")
     print(" Upload URL:")
     print(" http://0.0.0.0:5000/upload")
     print("====================================\n")

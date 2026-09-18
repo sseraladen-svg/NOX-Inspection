@@ -2,21 +2,31 @@ import cv2
 import time
 import os
 import sys
+import argparse
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from detection.detector import Detector
+from core.config_loader import load_config
+from core.preprocessing import Preprocessor
+from core.detector import Detector
+from core.decision_engine import DecisionEngine
+from core.overlay import draw_aoi_overlay
 
 IMAGE_PATH = "received_images/latest.jpg"
 
+
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--product", default="prismatic_cell", help="Product config id under config/")
+    args = parser.parse_args()
 
-    print("[BatteryVisionAI] Starting...")
+    config = load_config(args.product)
 
-    detector = Detector(
-        seg_model_path="models/yolo11n-seg.pt",
-        conf=0.5
-    )
+    print(f"[NOX Inspection] Starting... (product={config['product_id']})")
+
+    preprocessor = Preprocessor(config)
+    detector = Detector(config)
+    decision_engine = DecisionEngine(config)
 
     last_modified = 0
 
@@ -37,22 +47,23 @@ def main():
             if frame is None:
                 continue
 
-            annotated_frame, detections = detector.detect(frame)
-            annotated_frame = detector.draw_info(annotated_frame, detections)
+            processed = preprocessor.process(frame)
+            _, detections = detector.detect(processed)
+            decision = decision_engine.evaluate(detections)
+            annotated_frame = draw_aoi_overlay(processed, decision["detections"])
 
-            cv2.imshow("BatteryVisionAI", annotated_frame)
+            cv2.imshow("NOX Inspection", annotated_frame)
 
-            if detections:
-                print("\nDetections:")
-                for d in detections:
-                    print(f"{d['label']} | {d['confidence']:.2f}")
-            else:
-                print("PASS")
+            print(f"\nResult: {decision['result']} ({decision['severity']})")
+            if decision["detections"]:
+                for d in decision["detections"]:
+                    print(f"  {d['label']} | {d['confidence']:.2f} | {d['severity']}")
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
     cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     main()
