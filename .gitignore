@@ -1,37 +1,4 @@
-# Model checkpoints (store in shared Google Drive instead)
-*.pt
-*.pth
-*.h5
-*.onnx
-models/*.pt
-
-# Datasets (store in shared Google Drive instead)
-dataset/yolo_seg/images/*
-dataset/yolo_seg/labels/*
-dataset/mvtec_anomaly_detection/*
-dataset/archive.zip
-!dataset/yolo_seg/data.yaml
-
-# Training outputs / runs
-runs/
-received_images/*
-
-# CNN classifier data/checkpoints (friend's folder)
-cnn_classifier/checkpoints/*.pt
-cnn_classifier/data/*
-
-# Python
+dataset/synthetic_generated/
+data/
 __pycache__/
 *.pyc
-*.pyo
-.venv/
-venv/
-.env
-
-# OS
-.DS_Store
-Thumbs.db
-
-# IDE
-.vscode/
-*.log
