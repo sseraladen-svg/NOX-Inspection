@@ -1,0 +1,1 @@
+"""Defect classification stage."""

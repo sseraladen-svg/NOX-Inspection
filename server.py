@@ -1,68 +1,131 @@
-import sys, os
-sys.path.append(os.path.abspath('.')) # CRITICAL FIX FOR COLAB
-
-from flask import Flask, request
-import cv2, numpy as np, csv, shutil, time
+import argparse
+import csv
+import shutil
 from datetime import datetime
-from detection.detector import Detector
-from aoi_overlay import draw_aoi_overlay
+from pathlib import Path
+
+import cv2
+import numpy as np
+from flask import Flask, request
+
+from pipeline.router import PipelineRouter
+from utils.config_loader import load_config
+from utils.overlay import draw_aoi_overlay
 
 app = Flask(__name__)
+CONFIG = load_config()
+router: PipelineRouter | None = None
+
+DATA_DIR = Path("data")
+for directory in ("original", "annotated", "pass", "fail", "logs"):
+    (DATA_DIR / directory).mkdir(parents=True, exist_ok=True)
+
+CSV_FILE = DATA_DIR / "logs" / "inspection.csv"
+if not CSV_FILE.exists():
+    with CSV_FILE.open("w", newline="", encoding="utf-8") as log_file:
+        csv.writer(log_file).writerow(
+            [
+                "ImageID",
+                "Timestamp",
+                "Result",
+                "DefectType",
+                "Confidence",
+                "Preprocessing(ms)",
+                "Detection(ms)",
+                "Classification(ms)",
+                "Stage 4 Anomaly(ms)",
+                "Stage 5 Decision(ms)",
+                "Total(ms)",
+            ]
+        )
+
 
 @app.route("/")
 def index():
     return "BatteryVisionAI Server is Running! Use POST /upload to send images."
 
-DATA_DIR = "data"
-for d in ["original", "annotated", "pass", "fail", "logs"]:
-    os.makedirs(os.path.join(DATA_DIR, d), exist_ok=True)
-
-CSV_FILE = os.path.join(DATA_DIR, "logs", "inspection.csv")
-if not os.path.exists(CSV_FILE):
-    with open(CSV_FILE, "w", newline="") as f:
-        csv.writer(f).writerow(["ImageID", "Timestamp", "Result", "DefectType", "Confidence", "Time(ms)"])
-
-detector = Detector(seg_model_path="models/yolo11n-seg.pt", conf=0.5)
 
 @app.route("/upload", methods=["POST"])
 def upload():
+    if router is None:
+        return "Inspection pipeline is not initialized", 503
+
     image_bytes = request.data
-    if len(image_bytes) == 0: return "No Image", 400
+    if len(image_bytes) == 0:
+        return "No Image", 400
 
     frame = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
-    if frame is None: return "Invalid Image", 400
+    if frame is None:
+        return "Invalid Image", 400
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     image_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    
-    original_path = os.path.join(DATA_DIR, "original", f"{image_id}.jpg")
-    cv2.imwrite(original_path, frame)
+    station_id = request.headers.get("X-Station-ID", "default")
+    camera_id = request.headers.get("X-Camera-ID", "default")
 
-    roi = cv2.resize(frame, (640, 640), interpolation=cv2.INTER_LINEAR)
-    roi = cv2.GaussianBlur(roi, (3, 3), 0)
+    original_path = DATA_DIR / "original" / f"{image_id}.jpg"
+    if not cv2.imwrite(str(original_path), frame):
+        return "Could not save input image", 500
 
-    start = time.perf_counter()
-    annotated_frame, detections = detector.detect(roi)
-    annotated_frame = draw_aoi_overlay(annotated_frame, detections)
-    annotated_frame = detector.draw_info(annotated_frame, detections)
-    end = time.perf_counter()
-    
-    inference_time = round((end - start) * 1000, 2)
-    annotated_path = os.path.join(DATA_DIR, "annotated", f"{image_id}.jpg")
-    cv2.imwrite(annotated_path, annotated_frame)
+    decision, timings = router.run(frame, station_id, camera_id)
+    processed = decision.pop("_processed_frame")
+    annotated_frame = draw_aoi_overlay(processed, decision["detections"])
+    annotated_path = DATA_DIR / "annotated" / f"{image_id}.jpg"
+    if not cv2.imwrite(str(annotated_path), annotated_frame):
+        return "Could not save annotated image", 500
 
-    if len(detections) > 0:
-        result, defect, confidence = "FAIL", detections[0]["label"], detections[0]["confidence"]
-        shutil.copy(original_path, os.path.join(DATA_DIR, "fail", f"{image_id}.jpg"))
-    else:
-        result, defect, confidence = "PASS", "None", 1.00
-        shutil.copy(original_path, os.path.join(DATA_DIR, "pass", f"{image_id}.jpg"))
+    result = decision["result"]
+    defect = decision["defect_type"]
+    confidence = decision["confidence"]
+    destination = DATA_DIR / result.lower() / f"{image_id}.jpg"
+    shutil.copy2(original_path, destination)
 
-    with open(CSV_FILE, "a", newline="") as f:
-        csv.writer(f).writerow([image_id, timestamp, result, defect, confidence, inference_time])
+    with CSV_FILE.open("a", newline="", encoding="utf-8") as log_file:
+        csv.writer(log_file).writerow(
+            [
+                image_id,
+                timestamp,
+                result,
+                defect,
+                confidence,
+                round(timings["preprocessing_ms"], 2),
+                round(timings["detection_ms"], 2),
+                round(timings["classification_ms"], 2),
+                round(timings["stage_4_anomaly_ms"], 2),
+                round(timings["stage_5_decision_ms"], 2),
+                round(timings["total_ms"], 2),
+            ]
+        )
 
-    print(f"[{timestamp}] {result} | Defect: {defect} | Time: {inference_time}ms")
+    print(
+        f"[{timestamp}] {result} | Defect: {defect} | "
+        f"Preprocessing: {timings['preprocessing_ms']:.2f}ms | "
+        f"Detection: {timings['detection_ms']:.2f}ms | "
+        f"Classification: {timings['classification_ms']:.2f}ms | "
+        f"Stage 4 anomaly: {timings['stage_4_anomaly_ms']:.2f}ms | "
+        f"Stage 5 decision: {timings['stage_5_decision_ms']:.2f}ms | "
+        f"Total: {timings['total_ms']:.2f}ms"
+    )
     return "OK", 200
 
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Battery cell AOI inspection server")
+    parser.add_argument("--product", default="prismatic_cell")
+    parser.add_argument("--config", type=Path)
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=5000)
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    args = _parse_args()
+    config_path = args.config or Path("config") / f"{args.product}.yaml"
+    if config_path.is_file():
+        CONFIG = load_config(config_path)
+    else:
+        print(
+            f"WARNING: {config_path} not found; using built-in pipeline defaults."
+        )
+    router = PipelineRouter(CONFIG)
+    app.run(host=args.host, port=args.port, debug=False)
